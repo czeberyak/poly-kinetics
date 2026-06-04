@@ -1,0 +1,23 @@
+# Виртуальное окружение
+.venv/
+env/
+venv/
+ENV/
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Временные файлы Jupyter Ноутбуков
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# Настройки VS Code
+.vscode/
+
+# Системные файлы
+.DS_Store
+Thumbs.db
