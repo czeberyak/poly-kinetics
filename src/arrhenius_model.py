@@ -2,8 +2,9 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 import json
-import os
 import warnings
+from pathlib import Path
+from typing import Optional, Union, List
 
 class ArrheniusKinetics:
     """
@@ -11,18 +12,23 @@ class ArrheniusKinetics:
     Поддерживает генерацию данных, обучение, сохранение и загрузку параметров.
     """
 
-    def __init__(self):
-        self.Ea_R = None      # Энергия активации / Газовая постоянная
-        self.ln_A = None      # Натуральный логарифм предэкспоненциального множителя
-        self.is_fitted = False
-        self.model_path = "models/arrhenius_params.json"
+    def __init__(self, model_path: Union[str, Path] = "models/arrhenius_params.json"):
+        self.Ea_R: Optional[float] = None      # Энергия активации / Газовая постоянная
+        self.ln_A: Optional[float] = None      # Натуральный логарифм предэкспоненциального множителя
+        self.is_fitted: bool = False
+        self.model_path = Path(model_path)
+        self.data: Optional[pd.DataFrame] = None
 
     @staticmethod
-    def _arrhenius_equation(T_K, ln_A, Ea_R):
-        """Базовое уравнение Аррениуса: k = A * exp(-Ea / RT)"""
-        return np.exp(ln_A - Ea_R / T_K)
+    def _arrhenius_equation(T_K: np.ndarray, ln_A: float, Ea_R: float) -> np.ndarray:
+        """
+        Уравнение Аррениуса для ВРЕМЕНИ жизни (t ~ 1/k).
+        t = A_time * exp(+Ea / RT)
+        Внимание: знак ПЛЮС, так как время обратно пропорционально скорости реакции.
+        """
+        return np.exp(ln_A + Ea_R / T_K)
 
-    def generate_synthetic_data(self, n_samples=2000, seed=42):
+    def generate_synthetic_data(self, n_samples: int = 2000, seed: int = 42) -> pd.DataFrame:
         """Генерирует физически достоверный датасет."""
         np.random.seed(seed)
         
@@ -32,7 +38,7 @@ class ArrheniusKinetics:
         humidity = np.random.uniform(30, 80, n_samples)
         nco_oh_ratio = np.random.uniform(1.0, 1.15, n_samples)
 
-        # Физическое ядро (исправленные константы)
+        # Физическое ядро
         Ea_R_true = 3200
         C_true = 0.0006
         
@@ -52,43 +58,51 @@ class ArrheniusKinetics:
         
         return self.data
 
-    def fit(self, df=None):
+    def fit(self, df: Optional[pd.DataFrame] = None) -> None:
         """Обучает модель, находя параметры Ea/R и ln(A)."""
-        if df is None and not hasattr(self, 'data'):
-            raise ValueError("Нет данных для обучения. Сначала вызовите generate_synthetic_data()")
+        if df is None and self.data is None:
+            raise ValueError("Нет данных для обучения. Передайте df или сначала вызовите generate_synthetic_data()")
             
         data = df if df is not None else self.data
         T_K = data['Temperature_C'].values + 273.15
         y = data['Pot_Life_min'].values
         
+        # Фильтрация некорректных значений
         mask = y > 0
         T_K_clean = T_K[mask]
         y_clean = y[mask]
 
         try:
-            popt, pcov = curve_fit(self._arrhenius_equation, T_K_clean, y_clean, p0=[10, 3000])
+            # maxfev увеличен для гарантии сходимости сложных кривых
+            popt, pcov = curve_fit(
+                self._arrhenius_equation, 
+                T_K_clean, 
+                y_clean, 
+                p0=[-8.0, 3000.0], # Начальные приближения: ln(A) ~ -8, Ea/R ~ 3000
+                maxfev=10000
+            )
             self.ln_A, self.Ea_R = popt
             self.is_fitted = True
-            print(f"Модель обучена успешно!\nНайдено Ea/R: {self.Ea_R:.2f}\nНайдено ln(A): {self.ln_A:.2f}")
+            print(f"Модель обучена успешно!\nНайдено Ea/R: {self.Ea_R:.2f} (должно быть > 0)\nНайдено ln(A): {self.ln_A:.2f}")
         except Exception as e:
             print(f"Ошибка при фиттинге модели: {e}")
+            self.is_fitted = False
 
-    def predict(self, temperature_c):
-        """Предсказывает время жизни при заданной температуре."""
+    def predict(self, temperature_c: Union[float, List[float], np.ndarray, pd.Series]) -> np.ndarray:
+        """Предсказывает время жизни при заданной температуре (поддерживает векторизацию)."""
         if not self.is_fitted:
             raise RuntimeError("Сначала необходимо обучить модель методом .fit() или загрузить параметры .load_model()")
             
-        t_k = temperature_c + 273.15
+        t_k = np.asarray(temperature_c) + 273.15
         return self._arrhenius_equation(t_k, self.ln_A, self.Ea_R)
 
-    def save_model(self, path=None):
+    def save_model(self, path: Optional[Union[str, Path]] = None) -> None:
         """Сохраняет параметры модели в JSON файл."""
         if not self.is_fitted:
             raise RuntimeError("Нельзя сохранить необученную модель.")
         
-        save_path = path or self.model_path
-        # Создаем папку models, если её нет
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        save_path = Path(path) if path else self.model_path
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         
         model_data = {
             "Ea_R": float(self.Ea_R),
@@ -96,21 +110,21 @@ class ArrheniusKinetics:
             "is_fitted": True
         }
         
-        with open(save_path, 'w') as f:
+        with open(save_path, 'w', encoding='utf-8') as f:
             json.dump(model_data, f, indent=4)
         print(f"Параметры модели сохранены в {save_path}")
 
-    def load_model(self, path=None):
+    def load_model(self, path: Optional[Union[str, Path]] = None) -> None:
         """Загружает параметры модели из JSON файла."""
-        load_path = path or self.model_path
+        load_path = Path(path) if path else self.model_path
         
-        if not os.path.exists(load_path):
+        if not load_path.exists():
             raise FileNotFoundError(f"Файл модели не найден: {load_path}")
             
-        with open(load_path, 'r') as f:
+        with open(load_path, 'r', encoding='utf-8') as f:
             model_data = json.load(f)
             
         self.Ea_R = model_data["Ea_R"]
         self.ln_A = model_data["ln_A"]
-        self.is_fitted = model_data["is_fitted"]
+        self.is_fitted = model_data.get("is_fitted", True)
         print(f"Модель успешно загружена из {load_path}")
